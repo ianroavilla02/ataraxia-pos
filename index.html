@@ -30,7 +30,7 @@ const sb = supabase.createClient(SB_URL, SB_KEY);
 const fmt = new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 });
 const cop = (n) => fmt.format(n || 0);
 
-const CATS = ["Boletería", "Bebidas", "Otros"];
+const CATS = ["Boletería", "Barra"];
 const METHODS = [
   { id: "efectivo", label: "Efectivo", color: "#4ADE80" },
   { id: "nequi", label: "Nequi", color: "#FF2D8A" },
