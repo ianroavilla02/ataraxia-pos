@@ -112,8 +112,8 @@ function App() {
       qty: saleQty, price: it.price, cost: it.cost, method,
     };
 
-    const [{ error: saleErr }, { error: stockErr }] = await Promise.all([
-      sb.from("ataraxia_sales").insert(sale),
+    const [{ data: saleRow, error: saleErr }, { error: stockErr }] = await Promise.all([
+      sb.from("ataraxia_sales").insert(sale).select().single(),
       sb.from("ataraxia_items").update({ stock: newStock }).eq("id", it.id),
     ]);
 
@@ -124,6 +124,7 @@ function App() {
     }
 
     setItems((prev) => prev.map((i) => i.id === it.id ? { ...i, stock: newStock } : i));
+    if (saleRow) setSales((prev) => [saleRow, ...prev]);
     setSaleItem(null);
     setSaleQty(1);
     setSyncing(false);
