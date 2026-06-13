@@ -11,16 +11,21 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body style="margin:0;background:#0D0A12;">
 <div id="root"></div>
 <script type="text/babel" data-type="module">
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
+
+/* ============ Supabase ============ */
+const SB_URL = "https://hdfaxjxqsrknfcghawdl.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhkZmF4anhxc3JrbmZjZ2hhd2RsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MzYyNzQsImV4cCI6MjA5NjAxMjI3NH0.OGsEKCd2PrckG0lpWaBgZdmSE1nTCaAU7E8GtSUJwGI";
+const sb = supabase.createClient(SB_URL, SB_KEY);
 
 /* ============ Helpers ============ */
 const fmt = new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 });
 const cop = (n) => fmt.format(n || 0);
-const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
 
 const CATS = ["Boletería", "Bebidas", "Otros"];
 const METHODS = [
@@ -29,24 +34,6 @@ const METHODS = [
   { id: "tarjeta", label: "Tarjeta", color: "#5EB3FF" },
 ];
 const methodOf = (id) => METHODS.find((m) => m.id === id);
-
-const SEED = [
-  { id: uid(), name: "Entrada preventa", cat: "Boletería", cost: 0, price: 25000, stock: 100 },
-  { id: uid(), name: "Entrada taquilla", cat: "Boletería", cost: 0, price: 35000, stock: 100 },
-  { id: uid(), name: "Combo x3 entradas", cat: "Boletería", cost: 0, price: 60000, stock: 30 },
-  { id: uid(), name: "Entrada promo", cat: "Boletería", cost: 0, price: 15000, stock: 20 },
-];
-
-const STORAGE_KEY = "pos-noche-v1";
-
-const storage = {
-  get(key) {
-    try { const v = localStorage.getItem(key); return v ? { value: v } : null; } catch { return null; }
-  },
-  set(key, value) {
-    try { localStorage.setItem(key, value); } catch(e) { console.error("storage", e); }
-  }
-};
 
 /* ============ App ============ */
 function App() {
@@ -59,85 +46,154 @@ function App() {
   const [editItem, setEditItem] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [toast, setToast] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const itemsRef = useRef([]);
+  const salesRef = useRef([]);
 
-  useEffect(() => {
-    const r = storage.get(STORAGE_KEY);
-    if (r && r.value) {
-      try {
-        const d = JSON.parse(r.value);
-        setItems(d.items || []);
-        setSales(d.sales || []);
-        return;
-      } catch {}
-    }
-    setItems(SEED);
-    setSales([]);
-  }, []);
-
-  const persist = (nextItems, nextSales) => {
-    storage.set(STORAGE_KEY, JSON.stringify({ items: nextItems, sales: nextSales }));
-  };
-  const update = (nextItems, nextSales) => {
-    setItems(nextItems);
-    setSales(nextSales);
-    persist(nextItems, nextSales);
-  };
+  useEffect(() => { itemsRef.current = items || []; }, [items]);
+  useEffect(() => { salesRef.current = sales; }, [sales]);
 
   const flash = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   };
 
-  const recordSale = (method) => {
-    const it = items.find((i) => i.id === saleItem.id);
+  /* ---- load from supabase ---- */
+  useEffect(() => {
+    (async () => {
+      const [{ data: dbItems }, { data: dbSales }] = await Promise.all([
+        sb.from("ataraxia_items").select("*").order("created_at"),
+        sb.from("ataraxia_sales").select("*").order("ts", { ascending: false }),
+      ]);
+      setItems(dbItems || []);
+      setSales(dbSales || []);
+    })();
+  }, []);
+
+  /* ---- realtime subscriptions ---- */
+  useEffect(() => {
+    const channel = sb.channel("ataraxia-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "ataraxia_items" }, (payload) => {
+        if (payload.eventType === "INSERT") {
+          setItems((prev) => {
+            if (prev.some((i) => i.id === payload.new.id)) return prev;
+            return [...prev, payload.new];
+          });
+        } else if (payload.eventType === "UPDATE") {
+          setItems((prev) => prev.map((i) => i.id === payload.new.id ? payload.new : i));
+        } else if (payload.eventType === "DELETE") {
+          setItems((prev) => prev.filter((i) => i.id !== payload.old.id));
+        }
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "ataraxia_sales" }, (payload) => {
+        if (payload.eventType === "INSERT") {
+          setSales((prev) => {
+            if (prev.some((s) => s.id === payload.new.id)) return prev;
+            return [payload.new, ...prev];
+          });
+        } else if (payload.eventType === "DELETE") {
+          setSales((prev) => prev.filter((s) => s.id !== payload.old.id));
+        }
+      })
+      .subscribe();
+
+    return () => { sb.removeChannel(channel); };
+  }, []);
+
+  /* ---- actions ---- */
+  const recordSale = async (method) => {
+    const it = itemsRef.current.find((i) => i.id === saleItem.id);
     if (!it || it.stock < saleQty) return;
+    setSyncing(true);
+
+    const newStock = it.stock - saleQty;
     const sale = {
-      id: uid(), itemId: it.id, name: it.name, cat: it.cat,
-      qty: saleQty, price: it.price, cost: it.cost, method, ts: Date.now(),
+      item_id: it.id, name: it.name, cat: it.cat,
+      qty: saleQty, price: it.price, cost: it.cost, method,
     };
-    const nextItems = items.map((i) => (i.id === it.id ? { ...i, stock: i.stock - saleQty } : i));
-    update(nextItems, [sale, ...sales]);
+
+    const [{ error: saleErr }, { error: stockErr }] = await Promise.all([
+      sb.from("ataraxia_sales").insert(sale),
+      sb.from("ataraxia_items").update({ stock: newStock }).eq("id", it.id),
+    ]);
+
+    if (saleErr || stockErr) {
+      flash("Error al registrar venta");
+      setSyncing(false);
+      return;
+    }
+
+    setItems((prev) => prev.map((i) => i.id === it.id ? { ...i, stock: newStock } : i));
     setSaleItem(null);
     setSaleQty(1);
+    setSyncing(false);
     flash(`${saleQty} × ${it.name} · ${cop(it.price * saleQty)} · ${methodOf(method).label}`);
   };
 
-  const undoSale = (sale) => {
-    const nextItems = items.map((i) => (i.id === sale.itemId ? { ...i, stock: i.stock + sale.qty } : i));
-    update(nextItems, sales.filter((s) => s.id !== sale.id));
+  const undoSale = async (sale) => {
+    setSyncing(true);
+    const it = itemsRef.current.find((i) => i.id === sale.item_id);
+    const newStock = it ? it.stock + sale.qty : sale.qty;
+
+    await Promise.all([
+      sb.from("ataraxia_sales").delete().eq("id", sale.id),
+      it ? sb.from("ataraxia_items").update({ stock: newStock }).eq("id", it.id) : Promise.resolve(),
+    ]);
+
+    setItems((prev) => prev.map((i) => i.id === sale.item_id ? { ...i, stock: newStock } : i));
+    setSales((prev) => prev.filter((s) => s.id !== sale.id));
+    setSyncing(false);
     flash("Venta deshecha, stock restaurado");
   };
 
-  const saveItem = (data) => {
+  const saveItem = async (data) => {
     if (!data.name.trim()) return;
-    let nextItems;
+    setSyncing(true);
+
     if (data.id) {
-      nextItems = items.map((i) => (i.id === data.id ? { ...i, ...data } : i));
+      const { id, created_at, ...updates } = data;
+      await sb.from("ataraxia_items").update(updates).eq("id", id);
+      setItems((prev) => prev.map((i) => i.id === id ? { ...i, ...updates } : i));
     } else {
-      nextItems = [...items, { ...data, id: uid() }];
+      const { id, ...insert } = data;
+      const { data: row } = await sb.from("ataraxia_items").insert(insert).select().single();
+      if (row) setItems((prev) => [...prev, row]);
     }
-    update(nextItems, sales);
+    setSyncing(false);
     setEditItem(null);
   };
 
-  const deleteItem = (id) => {
-    update(items.filter((i) => i.id !== id), sales);
+  const deleteItem = async (id) => {
+    setSyncing(true);
+    await sb.from("ataraxia_items").delete().eq("id", id);
+    setItems((prev) => prev.filter((i) => i.id !== id));
+    setSyncing(false);
     setEditItem(null);
   };
 
-  const bumpStock = (id, delta) => {
-    const nextItems = items.map((i) => (i.id === id ? { ...i, stock: Math.max(0, i.stock + delta) } : i));
-    update(nextItems, sales);
+  const bumpStock = async (id, delta) => {
+    const it = itemsRef.current.find((i) => i.id === id);
+    if (!it) return;
+    const newStock = Math.max(0, it.stock + delta);
+    setItems((prev) => prev.map((i) => i.id === id ? { ...i, stock: newStock } : i));
+    await sb.from("ataraxia_items").update({ stock: newStock }).eq("id", id);
   };
 
-  const resetNight = (keepItems) => {
-    if (keepItems) update(items, []);
-    else update([], []);
+  const resetNight = async (keepItems) => {
+    setSyncing(true);
+    await sb.from("ataraxia_sales").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    if (!keepItems) {
+      await sb.from("ataraxia_items").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+      setItems([]);
+    }
+    setSales([]);
     setConfirmReset(false);
     setTab("vender");
+    setSyncing(false);
     flash("Noche reiniciada");
   };
 
+  /* ---- derived ---- */
   const totals = useMemo(() => {
     const t = { revenue: 0, costGoods: 0, byMethod: { efectivo: 0, nequi: 0, tarjeta: 0 }, units: 0 };
     for (const s of sales) {
@@ -152,10 +208,10 @@ function App() {
   const perItem = useMemo(() => {
     const map = {};
     for (const s of sales) {
-      if (!map[s.itemId]) map[s.itemId] = { name: s.name, cat: s.cat, qty: 0, revenue: 0, cost: 0 };
-      map[s.itemId].qty += s.qty;
-      map[s.itemId].revenue += s.price * s.qty;
-      map[s.itemId].cost += s.cost * s.qty;
+      if (!map[s.item_id]) map[s.item_id] = { name: s.name, cat: s.cat, qty: 0, revenue: 0, cost: 0 };
+      map[s.item_id].qty += s.qty;
+      map[s.item_id].revenue += s.price * s.qty;
+      map[s.item_id].cost += s.cost * s.qty;
     }
     for (const i of items || []) {
       if (!map[i.id]) map[i.id] = { name: i.name, cat: i.cat, qty: 0, revenue: 0, cost: 0 };
@@ -188,6 +244,8 @@ function App() {
           <div className="ht-num">{cop(totals.revenue)}</div>
         </div>
       </header>
+
+      {syncing && <div className="sync-bar" />}
 
       {tab === "vender" && (
         <main className="main">
@@ -366,7 +424,7 @@ function App() {
 
             <div className="pay-btns">
               {METHODS.map((m) => (
-                <button key={m.id} className="pay" style={{ background: m.color }} onClick={() => recordSale(m.id)}>
+                <button key={m.id} className="pay" style={{ background: m.color }} onClick={() => recordSale(m.id)} disabled={syncing}>
                   {m.label}
                 </button>
               ))}
@@ -462,6 +520,12 @@ body { height: 100%; }
   font-family: 'Archivo', system-ui, sans-serif; padding-bottom: 84px;
 }
 .loading { padding: 48px; text-align: center; color: var(--muted); }
+.sync-bar {
+  height: 3px; background: linear-gradient(90deg, var(--amber), #FF2D8A, var(--amber));
+  background-size: 200% 100%; animation: sync 1s linear infinite;
+  position: sticky; top: 57px; z-index: 6;
+}
+@keyframes sync { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .head {
   display: flex; justify-content: space-between; align-items: flex-end;
   padding: 20px 16px 14px; border-bottom: 1px solid var(--line);
@@ -583,6 +647,7 @@ body { height: 100%; }
   font-weight: 800; font-size: 14px; color: #0D0A12; cursor: pointer; text-transform: uppercase; letter-spacing: 0.04em;
 }
 .pay:active { filter: brightness(0.85); }
+.pay:disabled { opacity: 0.5; cursor: wait; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span { font-size: 12px; color: var(--muted); font-weight: 600; }
 .field input {
@@ -609,7 +674,7 @@ body { height: 100%; }
   font-size: 13px; font-weight: 700; z-index: 30; white-space: nowrap; max-width: 92vw;
   overflow: hidden; text-overflow: ellipsis;
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 `;
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
