@@ -153,11 +153,13 @@ function App() {
 
     if (data.id) {
       const { id, created_at, ...updates } = data;
-      await sb.from("ataraxia_items").update(updates).eq("id", id);
+      const { error } = await sb.from("ataraxia_items").update(updates).eq("id", id);
+      if (error) { flash("Error al guardar: " + error.message); setSyncing(false); return; }
       setItems((prev) => prev.map((i) => i.id === id ? { ...i, ...updates } : i));
     } else {
       const { id, ...insert } = data;
-      const { data: row } = await sb.from("ataraxia_items").insert(insert).select().single();
+      const { data: row, error } = await sb.from("ataraxia_items").insert(insert).select().single();
+      if (error) { flash("Error al crear: " + error.message); setSyncing(false); return; }
       if (row) setItems((prev) => [...prev, row]);
     }
     setSyncing(false);
